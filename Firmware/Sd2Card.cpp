@@ -319,6 +319,22 @@ bool Sd2Card::init(uint8_t sckRateID, uint8_t chipSelectPin) {
       goto fail;
     }
   }
+
+  // send 0xFF until 0xFF received to give card some clock cycles
+  t0 = (uint16_t)_millis();
+  SERIAL_ECHOLNRPGM(PSTR("Sending 0xFF"));
+  spiSend(0XFF);
+  while ((status_ = spiRec()) != 0xFF)
+  {
+    spiSend(0XFF);
+    if (((uint16_t)_millis() - t0) > SD_CARD_ERROR_FF_TIMEOUT)
+    {
+      error(SD_CARD_ERROR_CMD8);
+      SERIAL_ECHOLNRPGM(PSTR("No 0xFF received"));
+      goto fail;
+    }
+  }
+
   // check SD version
   if ((cardCommand(CMD8, 0x1AA) & R1_ILLEGAL_COMMAND)) {
     type(SD_CARD_TYPE_SD1);
@@ -751,6 +767,9 @@ uint8_t Sd2Card::waitStartBlock(void) {
 
 // Toshiba FlashAir support, copied from 
 // https://flashair-developers.com/en/documents/tutorials/arduino/
+// However, the official website was closed in September 2019.
+// There is an archived website (written in Japanese).
+// https://flashair-developers.github.io/website/docs/tutorials/arduino/2.html
 
 //------------------------------------------------------------------------------
 /** Perform Extention Read. */
@@ -758,7 +777,7 @@ uint8_t Sd2Card::readExt(uint32_t arg, uint8_t* dst, uint16_t count) {
   uint16_t i;
 
   // send command and argument.
-  if (cardCommand(CMD48, arg)) {
+  if (cardCommand(CMD48, arg) && cardCommand(CMD17, arg)) { // CMD48 for W-03, CMD17 for W-04
     error(SD_CARD_ERROR_CMD48);
     goto fail;
   }

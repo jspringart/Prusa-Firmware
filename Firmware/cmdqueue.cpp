@@ -18,6 +18,10 @@ int buflen = 0;
 // Therefore don't remove the command from the queue in the loop() function.
 bool cmdbuffer_front_already_processed = false;
 
+// Used for temporarely preventing accidental adding of Serial commands to the queue.
+// For now only check_file and the fancheck pause use this.
+bool cmdqueue_serial_disabled = false;
+
 int serial_count = 0;  //index of character read from serial line
 boolean comment_mode = false;
 char *strchr_pointer; // just a pointer to find chars in the command string like X, Y, Z, E, etc
@@ -91,14 +95,19 @@ bool cmdqueue_pop_front()
 
 void cmdqueue_reset()
 {
-    bufindr = 0;
-    bufindw = 0;
-    buflen = 0;
+	while (buflen)
+	{
+		// printf_P(PSTR("dumping: \"%s\" of type %hu\n"), cmdbuffer+bufindr+CMDHDRSIZE, CMDBUFFER_CURRENT_TYPE);
+		ClearToSend();
+		cmdqueue_pop_front();
+	}
+	bufindr = 0;
+	bufindw = 0;
 
 	//commands are removed from command queue after process_command() function is finished
 	//reseting command queue and enqueing new commands during some (usually long running) command processing would cause that new commands are immediately removed from queue (or damaged)
 	//this will ensure that all new commands which are enqueued after cmdqueue reset, will be always executed
-    cmdbuffer_front_already_processed = true; 
+	cmdbuffer_front_already_processed = true; 
 }
 
 // How long a string could be pushed to the front of the command queue?
@@ -224,9 +233,13 @@ void cmdqueue_dump_to_serial_single_line(int nr, const char *p)
     SERIAL_ECHOPGM("Entry nr: ");
     SERIAL_ECHO(nr);
     SERIAL_ECHOPGM(", type: ");
-    SERIAL_ECHO(int(*p));
+    int type = *p;
+    SERIAL_ECHO(type);
+    SERIAL_ECHOPGM(", size: ");
+    unsigned int size = *(unsigned int*)(p + 1);
+    SERIAL_ECHO(size);
     SERIAL_ECHOPGM(", cmd: ");
-    SERIAL_ECHO(p+1);  
+    SERIAL_ECHO(p + CMDHDRSIZE);
     SERIAL_ECHOLNPGM("");
 }
 
@@ -247,7 +260,7 @@ void cmdqueue_dump_to_serial()
             for (const char *p = cmdbuffer + bufindr; p < cmdbuffer + bufindw; ++ nr) {
                 cmdqueue_dump_to_serial_single_line(nr, p);
                 // Skip the command.
-                for (++p; *p != 0; ++ p);
+                for (p += CMDHDRSIZE; *p != 0; ++ p);
                 // Skip the gaps.
                 for (++p; p < cmdbuffer + bufindw && *p == 0; ++ p);
             }
@@ -255,14 +268,14 @@ void cmdqueue_dump_to_serial()
             for (const char *p = cmdbuffer + bufindr; p < cmdbuffer + sizeof(cmdbuffer); ++ nr) {
                 cmdqueue_dump_to_serial_single_line(nr, p);
                 // Skip the command.
-                for (++p; *p != 0; ++ p);
+                for (p += CMDHDRSIZE; *p != 0; ++ p);
                 // Skip the gaps.
                 for (++p; p < cmdbuffer + sizeof(cmdbuffer) && *p == 0; ++ p);
             }
             for (const char *p = cmdbuffer; p < cmdbuffer + bufindw; ++ nr) {
                 cmdqueue_dump_to_serial_single_line(nr, p);
                 // Skip the command.
-                for (++p; *p != 0; ++ p);
+                for (p += CMDHDRSIZE; *p != 0; ++ p);
                 // Skip the gaps.
                 for (++p; p < cmdbuffer + bufindw && *p == 0; ++ p);
             }
@@ -386,7 +399,7 @@ void get_command()
 	}
 
   // start of serial line processing loop
-  while ((MYSERIAL.available() > 0 && !saved_printing) || (MYSERIAL.available() > 0 && isPrintPaused)) {  //is print is saved (crash detection or filament detection), dont process data from serial line
+  while (((MYSERIAL.available() > 0 && !saved_printing) || (MYSERIAL.available() > 0 && isPrintPaused)) && !cmdqueue_serial_disabled) {  //is print is saved (crash detection or filament detection), dont process data from serial line
 	
     char serial_char = MYSERIAL.read();
 /*    if (selectedSerialPort == 1)
@@ -429,7 +442,7 @@ void get_command()
 				  // M110 - set current line number.
 				  // Line numbers not sent in succession.
 				  SERIAL_ERROR_START;
-				  SERIAL_ERRORRPGM(_n("Line Number is not Last Line Number+1, Last Line: "));////MSG_ERR_LINE_NO c=0 r=0
+				  SERIAL_ERRORRPGM(_n("Line Number is not Last Line Number+1, Last Line: "));////MSG_ERR_LINE_NO
 				  SERIAL_ERRORLN(gcode_LastN);
 				  //Serial.println(gcode_N);
 				  FlushSerialRequestResend();
@@ -445,7 +458,7 @@ void get_command()
 					  checksum = checksum^(*p++);
 				  if (int(strtol(strchr_pointer+1, NULL, 10)) != int(checksum)) {
 					  SERIAL_ERROR_START;
-					  SERIAL_ERRORRPGM(_n("checksum mismatch, Last Line: "));////MSG_ERR_CHECKSUM_MISMATCH c=0 r=0
+					  SERIAL_ERRORRPGM(_n("checksum mismatch, Last Line: "));////MSG_ERR_CHECKSUM_MISMATCH
 					  SERIAL_ERRORLN(gcode_LastN);
 					  FlushSerialRequestResend();
 					  serial_count = 0;
@@ -457,7 +470,7 @@ void get_command()
 			  else
 			  {
 				  SERIAL_ERROR_START;
-				  SERIAL_ERRORRPGM(_n("No Checksum with line number, Last Line: "));////MSG_ERR_NO_CHECKSUM c=0 r=0
+				  SERIAL_ERRORRPGM(_n("No Checksum with line number, Last Line: "));////MSG_ERR_NO_CHECKSUM
 				  SERIAL_ERRORLN(gcode_LastN);
 				  FlushSerialRequestResend();
 				  serial_count = 0;
@@ -474,7 +487,7 @@ void get_command()
         {
 
             SERIAL_ERROR_START;
-            SERIAL_ERRORRPGM(_n("No Line Number with checksum, Last Line: "));////MSG_ERR_NO_LINENUMBER_WITH_CHECKSUM c=0 r=0
+            SERIAL_ERRORRPGM(_n("No Line Number with checksum, Last Line: "));////MSG_ERR_NO_LINENUMBER_WITH_CHECKSUM
             SERIAL_ERRORLN(gcode_LastN);
 			FlushSerialRequestResend();
             serial_count = 0;
@@ -496,7 +509,7 @@ void get_command()
 
         //If command was e-stop process now
         if(strcmp(cmdbuffer+bufindw+CMDHDRSIZE, "M112") == 0)
-          kill("", 2);
+          kill(MSG_M112_KILL, 2);
         
         // Store the current line into buffer, move to the next line.
 		// Store type of entry
@@ -578,30 +591,6 @@ void get_command()
        ((serial_char == '#' || serial_char == ':') && comment_mode == false) ||
        serial_count >= (MAX_CMD_SIZE - 1) || n==-1)
     {
-      if(card.eof()){
-        SERIAL_PROTOCOLLNRPGM(_n("Done printing file"));////MSG_FILE_PRINTED c=0 r=0
-        stoptime=_millis();
-        char time[30];
-        unsigned long t=(stoptime-starttime-pause_time)/1000;
-        pause_time = 0;
-        int hours, minutes;
-        minutes=(t/60)%60;
-        hours=t/60/60;
-        save_statistics(total_filament_used, t);
-        sprintf_P(time, PSTR("%i hours %i minutes"),hours, minutes);
-        SERIAL_ECHO_START;
-        SERIAL_ECHOLN(time);
-        lcd_setstatus(time);
-        card.printingHasFinished();
-        card.checkautostart(true);
-
-        if (farm_mode)
-        {
-            prusa_statistics(6);
-            lcd_commands_type = LCD_COMMAND_FARM_MODE_CONFIRM;
-        }
-
-      }
       if(serial_char=='#')
         stop_buffering=true;
 
@@ -649,6 +638,9 @@ void get_command()
 
       comment_mode = false; //for new command
       serial_count = 0; //clear buffer
+    
+      if(card.eof()) break;
+    
       // The following line will reserve buffer space if available.
       if (! cmdqueue_could_enqueue_back(MAX_CMD_SIZE-1, true))
           return;
@@ -658,6 +650,37 @@ void get_command()
       if(serial_char == ';') comment_mode = true;
       else if(!comment_mode) cmdbuffer[bufindw+CMDHDRSIZE+serial_count++] = serial_char;
     }
+  }
+  if(card.eof())
+  {
+      // file was fully buffered, but commands might still need to be planned!
+      // do *not* clear sdprinting until all SD commands are consumed to ensure
+      // SD state can be resumed from a saved printing state. sdprinting is only
+      // cleared by printingHasFinished after peforming all remaining moves.
+      if(!cmdqueue_calc_sd_length())
+      {
+          SERIAL_PROTOCOLLNRPGM(_n("Done printing file"));////MSG_FILE_PRINTED
+          stoptime=_millis();
+          char time[30];
+          unsigned long t=(stoptime-starttime-pause_time)/1000;
+          pause_time = 0;
+          int hours, minutes;
+          minutes=(t/60)%60;
+          hours=t/60/60;
+          save_statistics(total_filament_used, t);
+          sprintf_P(time, PSTR("%i hours %i minutes"),hours, minutes);
+          SERIAL_ECHO_START;
+          SERIAL_ECHOLN(time);
+          lcd_setstatus(time);
+          card.printingHasFinished();
+          card.checkautostart(true);
+
+          if (farm_mode)
+          {
+              prusa_statistics(6);
+              lcd_commands_type = LcdCommands::FarmModeConfirm;
+          }
+      }
   }
 
   #endif //SDSUPPORT
